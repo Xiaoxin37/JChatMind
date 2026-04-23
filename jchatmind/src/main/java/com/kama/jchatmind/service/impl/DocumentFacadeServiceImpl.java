@@ -5,8 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kama.jchatmind.converter.DocumentConverter;
 import com.kama.jchatmind.exception.BizException;
 import com.kama.jchatmind.mapper.DocumentMapper;
-import com.kama.jchatmind.exception.BizException;
-import com.kama.jchatmind.mapper.DocumentMapper;
 import com.kama.jchatmind.model.dto.DocumentDTO;
 import com.kama.jchatmind.model.entity.Document;
 import com.kama.jchatmind.model.request.CreateDocumentRequest;
@@ -16,6 +14,7 @@ import com.kama.jchatmind.model.response.GetDocumentsResponse;
 import com.kama.jchatmind.model.vo.DocumentVO;
 import com.kama.jchatmind.mapper.ChunkBgeM3Mapper;
 import com.kama.jchatmind.model.entity.ChunkBgeM3;
+import com.kama.jchatmind.service.ChunkBgeM3IndexService;
 import com.kama.jchatmind.service.ChunkingService;
 import com.kama.jchatmind.service.DocumentFacadeService;
 import com.kama.jchatmind.model.dto.ParsedDocument;
@@ -48,6 +47,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     private final DocumentStorageService documentStorageService;
     private final DocumentParserService documentParserService;
     private final ChunkingService chunkingService;
+    private final ChunkBgeM3IndexService chunkBgeM3IndexService;
     private final ObjectMapper objectMapper;
     private final MarkdownParserService markdownParserService;
     private final RagService ragService;
@@ -209,6 +209,13 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
         if (result <= 0) {
             throw new BizException("删除文档失败");
         }
+
+        // 同步删除 BM25 索引
+        try {
+            chunkBgeM3IndexService.deleteByDocId(documentId);
+        } catch (Exception e) {
+            log.warn("删除 BM25 索引失败: documentId={}, error={}", documentId, e.getMessage());
+        }
     }
 
     /**
@@ -273,6 +280,8 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
                         if (result > 0) {
                             chunkCount++;
+                            // Index chunk in BM25 Lucene index
+                            chunkBgeM3IndexService.indexChunk(chunk.getId(), documentId, chunkContent);
                             log.debug("创建 chunk 成功: title={}, chunkIndex={}/{}, chunkId={}", title, i, chunkContents.size(), chunk.getId());
                         } else {
                             log.warn("创建 chunk 失败: title={}, chunkIndex={}", title, i);

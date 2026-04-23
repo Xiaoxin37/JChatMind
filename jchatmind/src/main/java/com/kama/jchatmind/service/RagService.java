@@ -6,4 +6,6 @@ public interface RagService {
     float[] embed(String text);
 
     List<String> similaritySearch(String kbId, String title);
+
+    List<String> similaritySearch(String kbId, String query, int topK);
 }

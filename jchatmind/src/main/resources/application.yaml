@@ -38,6 +38,12 @@ mybatis:
   type-handlers-package: com.kama.jchatmind.typehandler
 
 rag:
+  retrieval:
+    top-k: 5
+    bm25-top-k: 20
+    vector-top-k: 20
+    rrf-k: 60
+    bm25-index-path: ./data/bm25-index
   chunking:
     max-tokens: 512
     overlap-ratio: 0.15

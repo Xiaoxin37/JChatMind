@@ -106,6 +106,22 @@
             <artifactId>opencsv</artifactId>
             <version>5.10</version>
         </dependency>
+        <!-- Lucene for BM25 full-text indexing -->
+        <dependency>
+            <groupId>org.apache.lucene</groupId>
+            <artifactId>lucene-core</artifactId>
+            <version>9.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.lucene</groupId>
+            <artifactId>lucene-analysis-common</artifactId>
+            <version>9.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.lucene</groupId>
+            <artifactId>lucene-queryparser</artifactId>
+            <version>9.12.0</version>
+        </dependency>
 
         <!-- 数据访问 -->
         <dependency>
