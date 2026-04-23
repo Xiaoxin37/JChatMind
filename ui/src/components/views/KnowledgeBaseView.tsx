@@ -195,7 +195,7 @@ const KnowledgeBaseView: React.FC = () => {
             <Upload
               customRequest={handleUpload}
               showUploadList={false}
-              accept=".md"
+              accept=".md,.txt,.docx,.pdf,.xlsx,.xls,.csv"
               disabled={uploading}
             >
               <Button

@@ -14,6 +14,8 @@ import com.kama.jchatmind.model.vo.DocumentVO;
 import com.kama.jchatmind.mapper.ChunkBgeM3Mapper;
 import com.kama.jchatmind.model.entity.ChunkBgeM3;
 import com.kama.jchatmind.service.DocumentFacadeService;
+import com.kama.jchatmind.model.dto.ParsedDocument;
+import com.kama.jchatmind.service.DocumentParserService;
 import com.kama.jchatmind.service.DocumentStorageService;
 import com.kama.jchatmind.service.MarkdownParserService;
 import com.kama.jchatmind.service.RagService;
@@ -29,6 +31,7 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 @Service
 @AllArgsConstructor
@@ -38,6 +41,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     private final DocumentMapper documentMapper;
     private final DocumentConverter documentConverter;
     private final DocumentStorageService documentStorageService;
+    private final DocumentParserService documentParserService;
     private final MarkdownParserService markdownParserService;
     private final RagService ragService;
     private final ChunkBgeM3Mapper chunkBgeM3Mapper;
@@ -158,12 +162,11 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
             log.info("文档上传成功: kbId={}, documentId={}, filename={}", kbId, documentId, originalFilename);
 
-            // 如果是 Markdown 文件，进行解析并生成 chunks
-            if ("md".equalsIgnoreCase(filetype) || "markdown".equalsIgnoreCase(filetype)) {
-                processMarkdownDocument(kbId, documentId, filePath);
+            // 解析并生成 chunks（支持多格式）
+            if (isSupportedFormat(filetype)) {
+                processDocument(kbId, documentId, filePath, filetype, originalFilename);
             } else {
-                // TODO: 未来可以增加其他文件类型的处理逻辑
-                log.warn("待新增处理的文件类型: {}", filetype);
+                log.warn("不支持的文件格式: {}", filetype);
             }
 
             return CreateDocumentResponse.builder()
@@ -202,19 +205,91 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     }
 
     /**
-     * 处理 Markdown 文档，解析并生成 chunks
+     * 解析并处理文档，生成 chunks（支持多格式）
+     */
+    private void processDocument(String kbId, String documentId, String filePath, String filetype, String filename) {
+        try {
+            log.info("开始处理文档: kbId={}, documentId={}, filePath={}, filetype={}", kbId, documentId, filePath, filetype);
+
+            Path path = documentStorageService.getFilePath(filePath);
+            try (InputStream inputStream = Files.newInputStream(path)) {
+                List<ParsedDocument> sections = documentParserService.parse(inputStream, filetype, filename);
+
+                if (sections.isEmpty()) {
+                    log.warn("文档解析后没有找到任何章节: documentId={}", documentId);
+                    return;
+                }
+
+                LocalDateTime now = LocalDateTime.now();
+                int chunkCount = 0;
+
+                for (ParsedDocument section : sections) {
+                    String title = section.getTitle();
+                    String content = section.getContent();
+
+                    if (title == null || title.trim().isEmpty()) {
+                        continue;
+                    }
+
+                    // Build chunk content
+                    StringBuilder chunkContent = new StringBuilder();
+                    if (!section.getHierarchy().isEmpty()) {
+                        chunkContent.append(String.join(" > ", section.getHierarchy())).append("\n\n");
+                    }
+                    chunkContent.append(title).append("\n\n").append(content != null ? content : "");
+
+                    // Embed the title for retrieval
+                    float[] embedding = ragService.embed(title);
+
+                    // Serialize hierarchy to JSON for metadata
+                    String hierarchyJson = section.getHierarchy().isEmpty() ? null
+                            : section.getHierarchy().toString();
+
+                    ChunkBgeM3 chunk = ChunkBgeM3.builder()
+                            .kbId(kbId)
+                            .docId(documentId)
+                            .content(chunkContent.toString().trim())
+                            .metadata(hierarchyJson)
+                            .embedding(embedding)
+                            .createdAt(now)
+                            .updatedAt(now)
+                            .build();
+
+                    int result = chunkBgeM3Mapper.insert(chunk);
+
+                    if (result > 0) {
+                        chunkCount++;
+                        log.debug("创建 chunk 成功: title={}, chunkId={}", title, chunk.getId());
+                    } else {
+                        log.warn("创建 chunk 失败: title={}", title);
+                    }
+                }
+                log.info("文档处理完成: documentId={}, filetype={}, 共生成 {} 个 chunks", documentId, filetype, chunkCount);
+            }
+        } catch (Exception e) {
+            log.error("处理文档失败: documentId={}, filetype={}", documentId, filetype, e);
+            throw new BizException("文档解析失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 检查文件格式是否支持
+     */
+    private boolean isSupportedFormat(String filetype) {
+        String lower = filetype.toLowerCase();
+        return Set.of("md", "markdown", "txt", "docx", "pdf", "xlsx", "xls", "csv").contains(lower);
+    }
+
+    /**
+     * 处理 Markdown 文档（保留兼容，不再主流程调用）
      */
     private void processMarkdownDocument(String kbId, String documentId, String filePath) {
         try {
             log.info("开始处理 Markdown 文档: kbId={}, documentId={}, filePath={}", kbId, documentId, filePath);
 
-            // 从保存的文件路径读取文件
             Path path = documentStorageService.getFilePath(filePath);
             try (InputStream inputStream = Files.newInputStream(path)) {
-                // 解析 Markdown 文件
-                List<MarkdownParserService.MarkdownSection> sections = markdownParserService.parseMarkdown(inputStream);
-
-                System.out.println(sections);
+                List<ParsedDocument> sections = markdownParserService.parseMarkdown(inputStream);
 
                 if (sections.isEmpty()) {
                     log.warn("Markdown 文档解析后没有找到任何章节: documentId={}", documentId);
@@ -224,8 +299,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
                 LocalDateTime now = LocalDateTime.now();
                 int chunkCount = 0;
 
-                // 为每个章节生成 chunk
-                for (MarkdownParserService.MarkdownSection section : sections) {
+                for (ParsedDocument section : sections) {
                     String title = section.getTitle();
                     String content = section.getContent();
 
@@ -233,21 +307,18 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
                         continue;
                     }
 
-                    // 对标题进行 embedding
                     float[] embedding = ragService.embed(title);
 
-                    // 创建 ChunkBgeM3 实体
                     ChunkBgeM3 chunk = ChunkBgeM3.builder()
                             .kbId(kbId)
                             .docId(documentId)
                             .content(content != null ? content : "")
-                            .metadata(null) // 可以存储标题信息到 metadata
+                            .metadata(null)
                             .embedding(embedding)
                             .createdAt(now)
                             .updatedAt(now)
                             .build();
 
-                    // 插入数据库
                     int result = chunkBgeM3Mapper.insert(chunk);
 
                     if (result > 0) {
@@ -261,7 +332,6 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             }
         } catch (Exception e) {
             log.error("处理 Markdown 文档失败: documentId={}", documentId, e);
-            // 不抛出异常，避免影响文档上传流程
         }
     }
 
