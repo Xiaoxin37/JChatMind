@@ -47,6 +47,11 @@ rag:
   chunking:
     max-tokens: 512
     overlap-ratio: 0.15
+  reranking:
+    enabled: true
+    model: bge-reranker-v2-m3
+    top-n: 20
+    timeout-seconds: 5
 
 document:
   storage:

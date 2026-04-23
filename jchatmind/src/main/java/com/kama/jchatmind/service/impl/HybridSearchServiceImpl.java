@@ -7,6 +7,7 @@ import com.kama.jchatmind.service.ChunkBgeM3IndexService;
 import com.kama.jchatmind.service.ChunkBgeM3IndexService.Bm25Result;
 import com.kama.jchatmind.service.HybridSearchService;
 import com.kama.jchatmind.service.RagService;
+import com.kama.jchatmind.service.RagService.RerankResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -35,6 +36,15 @@ public class HybridSearchServiceImpl implements HybridSearchService {
 
     @Value("${rag.retrieval.rrf-k:60}")
     private int rrfK;
+
+    @Value("${rag.reranking.enabled:true}")
+    private boolean rerankingEnabled;
+
+    @Value("${rag.reranking.top-n:20}")
+    private int rerankTopN;
+
+    @Value("${rag.retrieval.top-k:5}")
+    private int defaultTopK;
 
     public HybridSearchServiceImpl(ChunkBgeM3IndexService bm25IndexService,
                                     RagService ragService,
@@ -68,8 +78,62 @@ public class HybridSearchServiceImpl implements HybridSearchService {
             vectorResults = Collections.emptyList();
         }
 
-        // Step 3: RRF Fusion
-        return rrfFuse(bm25Results, vectorResults, topK);
+        // Step 3: RRF Fusion - get rerankTopN candidates
+        List<HybridResult> rrfResults = rrfFuse(bm25Results, vectorResults, rerankTopN);
+
+        // Step 4: Rerank (if enabled) and return final topK
+        if (rerankingEnabled && !rrfResults.isEmpty()) {
+            return applyReranking(query, rrfResults, topK);
+        }
+
+        // Return topK from RRF results (no reranking)
+        return rrfResults.stream().limit(topK).collect(Collectors.toList());
+    }
+
+    /**
+     * Apply reranking on RRF-fused candidates.
+     * Takes top-N candidates, reranks by cosine similarity, returns final top-K.
+     */
+    private List<HybridResult> applyReranking(String query, List<HybridResult> candidates, int topK) {
+        List<String> contents = candidates.stream()
+                .map(HybridResult::content)
+                .collect(Collectors.toList());
+
+        List<RerankResult> reranked;
+        try {
+            reranked = ragService.rerank(query, contents);
+        } catch (Exception e) {
+            log.warn("重排序失败，返回 RRF 结果", e);
+            return candidates.stream().limit(topK).collect(Collectors.toList());
+        }
+
+        // Map reranked scores back to hybrid results
+        Map<Integer, Double> rerankScoreMap = new HashMap<>();
+        for (RerankResult rr : reranked) {
+            rerankScoreMap.put(rr.originalIndex, rr.score);
+        }
+
+        // Build reranked hybrid results, sorted by rerank score descending
+        List<HybridResult> rerankedResults = new ArrayList<>();
+        for (RerankResult rr : reranked) {
+            if (rr.originalIndex >= 0 && rr.originalIndex < candidates.size()) {
+                HybridResult original = candidates.get(rr.originalIndex);
+                rerankedResults.add(new HybridResult(
+                        original.chunkId,
+                        original.content,
+                        original.metadata,
+                        rr.score  // replace RRF score with rerank score
+                ));
+            }
+        }
+
+        // Return final top-K
+        List<HybridResult> finalResults = rerankedResults.stream()
+                .limit(topK)
+                .collect(Collectors.toList());
+
+        log.info("重排序完成: 候选数={}, 最终结果={}", candidates.size(), finalResults.size());
+        return finalResults;
     }
 
     /**
