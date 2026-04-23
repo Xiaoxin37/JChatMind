@@ -107,7 +107,7 @@
                updated_at
         FROM chunk_bge_m3
         WHERE kb_id = CAST(#{kbId} AS uuid)
-        ORDER BY embedding <-> #{vectorLiteral}::vector
+        ORDER BY embedding <=> #{vectorLiteral}::vector
         LIMIT #{limit}
         ]]>
     </select>

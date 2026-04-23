@@ -1,6 +1,6 @@
 package com.kama.jchatmind.agent.tools;
 
-import com.kama.jchatmind.service.RagService;
+import com.kama.jchatmind.service.HybridSearchService;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -8,10 +8,10 @@ import java.util.List;
 @Component
 public class KnowledgeTools implements Tool {
 
-    private final RagService ragService;
+    private final HybridSearchService hybridSearchService;
 
-    public KnowledgeTools(RagService ragService) {
-        this.ragService = ragService;
+    public KnowledgeTools(HybridSearchService hybridSearchService) {
+        this.hybridSearchService = hybridSearchService;
     }
 
     @Override
@@ -34,7 +34,9 @@ public class KnowledgeTools implements Tool {
             description = "从指定知识库中执行相似性检索（RAG）。参数为知识库 ID（kbsId）和查询文本（query），返回与查询最相关的知识片段。"
     )
     public String knowledgeQuery(String kbsId, String query) {
-        List<String> strings = ragService.similaritySearch(kbsId, query);
-        return String.join("\n", strings);
+        List<HybridSearchService.HybridResult> results = hybridSearchService.search(kbsId, query, 5);
+        return results.stream()
+                .map(r -> r.content)
+                .collect(java.util.stream.Collectors.joining("\n"));
     }
 }
