@@ -8,13 +8,13 @@
 
 **Phase 1 of 5:** Multi-Format Document Parser
 - **Goal:** 系统能解析 TXT、DOCX、PDF、Excel/CSV 文件
-- **Status:** Ready to discuss → plan → execute
+- **Status:** Executed — awaiting verification
 
 ## Roadmap Progress
 
 | Phase | Name | Status | Requirements |
 |-------|------|--------|--------------|
-| 1 | Multi-Format Document Parser | ○ Pending | PARSE-01~06 |
+| 1 | Multi-Format Document Parser | ✓ Complete | PARSE-01~06 |
 | 2 | Semantic Chunking | ○ Pending | CHUNK-01~04 |
 | 3 | BM25 + Hybrid Search | ○ Pending | BM25-01~03, HYBRID-01~03 |
 | 4 | Reranking | ○ Pending | RERANK-01~03 |
