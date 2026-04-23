@@ -8,7 +8,7 @@
 
 **Phase 5 of 5:** End-to-End Integration
 - **Goal:** 全链路联调验证，确保上传-解析-分块-检索-重排流程完整
-- **Status:** Pending
+- **Status:** Complete
 
 ## Roadmap Progress
 
@@ -18,7 +18,7 @@
 | 2 | Semantic Chunking | ✓ Complete | CHUNK-01~04 |
 | 3 | BM25 + Hybrid Search | ✓ Complete | BM25-01~03, HYBRID-01~03 |
 | 4 | Reranking | ✓ Complete | RERANK-01~03 |
-| 5 | End-to-End Integration | ○ Pending | E2E-01~03 |
+| 5 | End-to-End Integration | ✓ Complete | E2E-01~03 |
 
 ## Requirements Summary
 
