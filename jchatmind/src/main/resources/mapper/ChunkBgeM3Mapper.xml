@@ -53,6 +53,19 @@
         WHERE id = CAST(#{id} AS uuid)
     </select>
 
+    <select id="selectByDocId" resultMap="BaseResultMap">
+        SELECT id,
+               kb_id,
+               doc_id,
+               content,
+               metadata,
+               embedding,
+               created_at,
+               updated_at
+        FROM chunk_bge_m3
+        WHERE doc_id = CAST(#{docId} AS uuid)
+    </select>
+
     <delete id="deleteById">
         DELETE
         FROM chunk_bge_m3

@@ -22,6 +22,8 @@ public interface ChunkBgeM3Mapper {
 
     int updateById(ChunkBgeM3 chunkBgeM3);
 
+    List<ChunkBgeM3> selectByDocId(@Param("docId") String docId);
+
     List<ChunkBgeM3> similaritySearch(
             @Param("kbId") String kbId,
             @Param("vectorLiteral") String vectorLiteral,

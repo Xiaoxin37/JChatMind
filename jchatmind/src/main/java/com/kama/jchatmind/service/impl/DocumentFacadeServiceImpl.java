@@ -1,7 +1,10 @@
 package com.kama.jchatmind.service.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kama.jchatmind.converter.DocumentConverter;
+import com.kama.jchatmind.exception.BizException;
+import com.kama.jchatmind.mapper.DocumentMapper;
 import com.kama.jchatmind.exception.BizException;
 import com.kama.jchatmind.mapper.DocumentMapper;
 import com.kama.jchatmind.model.dto.DocumentDTO;
@@ -13,6 +16,7 @@ import com.kama.jchatmind.model.response.GetDocumentsResponse;
 import com.kama.jchatmind.model.vo.DocumentVO;
 import com.kama.jchatmind.mapper.ChunkBgeM3Mapper;
 import com.kama.jchatmind.model.entity.ChunkBgeM3;
+import com.kama.jchatmind.service.ChunkingService;
 import com.kama.jchatmind.service.DocumentFacadeService;
 import com.kama.jchatmind.model.dto.ParsedDocument;
 import com.kama.jchatmind.service.DocumentParserService;
@@ -31,6 +35,7 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 @Service
@@ -42,6 +47,8 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     private final DocumentConverter documentConverter;
     private final DocumentStorageService documentStorageService;
     private final DocumentParserService documentParserService;
+    private final ChunkingService chunkingService;
+    private final ObjectMapper objectMapper;
     private final MarkdownParserService markdownParserService;
     private final RagService ragService;
     private final ChunkBgeM3Mapper chunkBgeM3Mapper;
@@ -231,37 +238,45 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
                         continue;
                     }
 
-                    // Build chunk content
-                    StringBuilder chunkContent = new StringBuilder();
-                    if (!section.getHierarchy().isEmpty()) {
-                        chunkContent.append(String.join(" > ", section.getHierarchy())).append("\n\n");
+                    // Split into chunks using semantic chunking service
+                    List<String> chunkContents = chunkingService.chunk(section, 0);
+                    if (chunkContents.isEmpty()) {
+                        continue;
                     }
-                    chunkContent.append(title).append("\n\n").append(content != null ? content : "");
 
-                    // Embed the title for retrieval
-                    float[] embedding = ragService.embed(title);
+                    // Build hierarchy metadata JSON
+                    Map<String, Object> metaBase = new java.util.LinkedHashMap<>();
+                    metaBase.put("hierarchy", section.getHierarchy());
+                    metaBase.put("sourceFormat", section.getSourceFormat());
+                    metaBase.put("title", title);
 
-                    // Serialize hierarchy to JSON for metadata
-                    String hierarchyJson = section.getHierarchy().isEmpty() ? null
-                            : section.getHierarchy().toString();
+                    for (int i = 0; i < chunkContents.size(); i++) {
+                        String chunkContent = chunkContents.get(i);
+                        metaBase.put("chunkIndex", i);
+                        metaBase.put("totalChunks", chunkContents.size());
+                        String metadataJson = objectMapper.writeValueAsString(metaBase);
 
-                    ChunkBgeM3 chunk = ChunkBgeM3.builder()
-                            .kbId(kbId)
-                            .docId(documentId)
-                            .content(chunkContent.toString().trim())
-                            .metadata(hierarchyJson)
-                            .embedding(embedding)
-                            .createdAt(now)
-                            .updatedAt(now)
-                            .build();
+                        // Embed chunk content (not just title)
+                        float[] embedding = ragService.embed(chunkContent);
 
-                    int result = chunkBgeM3Mapper.insert(chunk);
+                        ChunkBgeM3 chunk = ChunkBgeM3.builder()
+                                .kbId(kbId)
+                                .docId(documentId)
+                                .content(chunkContent)
+                                .metadata(metadataJson)
+                                .embedding(embedding)
+                                .createdAt(now)
+                                .updatedAt(now)
+                                .build();
 
-                    if (result > 0) {
-                        chunkCount++;
-                        log.debug("创建 chunk 成功: title={}, chunkId={}", title, chunk.getId());
-                    } else {
-                        log.warn("创建 chunk 失败: title={}", title);
+                        int result = chunkBgeM3Mapper.insert(chunk);
+
+                        if (result > 0) {
+                            chunkCount++;
+                            log.debug("创建 chunk 成功: title={}, chunkIndex={}/{}, chunkId={}", title, i, chunkContents.size(), chunk.getId());
+                        } else {
+                            log.warn("创建 chunk 失败: title={}, chunkIndex={}", title, i);
+                        }
                     }
                 }
                 log.info("文档处理完成: documentId={}, filetype={}, 共生成 {} 个 chunks", documentId, filetype, chunkCount);
