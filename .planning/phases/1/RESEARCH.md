@@ -476,22 +476,19 @@ public List<ParsedDocument> parseTxt(InputStream inputStream) {
 | A3 | Apache POI and OpenCSV are transitively included by `tika-parsers-standard-package` | Standard Stack | Low — can always declare explicitly if versions differ |
 | A4 | PDF bookmark extraction via PDFBookmarksHandler is available in Tika 3.x | PDF Pitfall | Medium — TIKA-2303 was optional; may need to configure ParseContext explicitly |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **PDF heading extraction quality**
-   - What we know: Tika produces flat text from PDFs. PDF bookmarks can be extracted but many PDFs don't have bookmarks.
-   - What's unclear: How effective is font-size-based heading detection for typical project documents?
-   - Recommendation: For Phase 1, use single "Document" as root title for PDF content. Defer heading recovery to Phase 2 or future improvement.
+1. **PDF heading extraction quality — RESOLVED**
+   - Resolution: For Phase 1, use filename (without extension) as the root title for PDF content. Split content by double-newline boundaries to create sections if content exceeds 2000 chars. This is a pragmatic compromise — PDF heading recovery is deferred to Phase 2 (semantic chunking). Decision documented in PLAN.md Task 4c.
+   - Date: 2026-04-23
 
-2. **Tika XHTML heading tag fidelity for DOCX**
-   - What we know: Tika maps Word heading styles to HTML heading tags in XHTML output.
-   - What's unclear: Does this work for all heading levels (H1-H6) and custom styles?
-   - Recommendation: Verify during implementation. If unreliable, fall back to Apache POI XWPF with style checking.
+2. **Tika XHTML heading tag fidelity for DOCX — RESOLVED**
+   - Resolution: Implement using Tika's XHTML output with `<h1>`-`<h6>` extraction. If heading tags are missing during implementation testing, fall back to Apache POI XWPF `XWPFParagraph.getStyle()` and `XWPFStyle.getName()` to detect heading styles. Both approaches will be coded; the primary path is Tika XHTML, fallback is POI.
+   - Date: 2026-04-23
 
-3. **Maximum file size limit**
-   - What we know: Tika has configurable size limits on `BodyContentHandler`.
-   - What's unclear: What's the practical file size limit for in-process parsing on the target deployment?
-   - Recommendation: Set a 10MB default limit. Document that larger files need manual handling or Tika server deployment.
+3. **Maximum file size limit — RESOLVED**
+   - Resolution: Set `BodyContentHandler` size limit to 10MB (`10 * 1024 * 1024`). This aligns with the project's expected document sizes and prevents OOM. If exceeded, throw `BizException("文件大小超过 10MB 限制")`.
+   - Date: 2026-04-23
 
 ## Environment Availability
 

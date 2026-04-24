@@ -49,9 +49,9 @@ rag:
     overlap-ratio: 0.15
   reranking:
     enabled: true
-    model: bge-reranker-v2-m3
+    model: dengcao/bge-reranker-v2-m3
     top-n: 20
-    timeout-seconds: 5
+    timeout-seconds: 15
 
 document:
   storage:

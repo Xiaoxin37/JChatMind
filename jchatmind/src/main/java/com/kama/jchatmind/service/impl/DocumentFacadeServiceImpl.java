@@ -25,6 +25,9 @@ import com.kama.jchatmind.service.RagService;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -36,11 +39,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Executor;
 
 @Service
 @AllArgsConstructor
 @Slf4j
 public class DocumentFacadeServiceImpl implements DocumentFacadeService {
+
+    private static final int INGESTION_BATCH_SIZE = 16;
 
     private final DocumentMapper documentMapper;
     private final DocumentConverter documentConverter;
@@ -52,6 +59,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     private final MarkdownParserService markdownParserService;
     private final RagService ragService;
     private final ChunkBgeM3Mapper chunkBgeM3Mapper;
+    private final Executor taskExecutor;
 
     @Override
     public GetDocumentsResponse getDocuments() {
@@ -117,6 +125,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public CreateDocumentResponse uploadDocument(String kbId, MultipartFile file) {
         try {
             if (file.isEmpty()) {
@@ -127,6 +136,9 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             String originalFilename = file.getOriginalFilename();
             String filetype = getFileType(originalFilename);
             long fileSize = file.getSize();
+            if (!isSupportedFormat(filetype)) {
+                throw new BizException("不支持的文件格式: " + filetype);
+            }
 
             // 创建文档记录（先创建记录，获取 documentId）
             DocumentDTO documentDTO = DocumentDTO.builder()
@@ -155,6 +167,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             // 更新文档记录，保存文件路径到 metadata
             DocumentDTO.MetaData metadata = new DocumentDTO.MetaData();
             metadata.setFilePath(filePath);
+            metadata.setProcessingStatus("PROCESSING");
             documentDTO.setMetadata(metadata);
             documentDTO.setId(documentId);
             documentDTO.setCreatedAt(now);
@@ -169,12 +182,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
             log.info("文档上传成功: kbId={}, documentId={}, filename={}", kbId, documentId, originalFilename);
 
-            // 解析并生成 chunks（支持多格式）
-            if (isSupportedFormat(filetype)) {
-                processDocument(kbId, documentId, filePath, filetype, originalFilename);
-            } else {
-                log.warn("不支持的文件格式: {}", filetype);
-            }
+            scheduleDocumentProcessing(kbId, documentId, filePath, filetype, originalFilename);
 
             return CreateDocumentResponse.builder()
                     .documentId(documentId)
@@ -182,6 +190,27 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
         } catch (IOException e) {
             log.error("文件保存失败", e);
             throw new BizException("文件保存失败: " + e.getMessage());
+        }
+    }
+
+    private void scheduleDocumentProcessing(String kbId, String documentId, String filePath, String filetype, String filename) {
+        Runnable task = () -> {
+            try {
+                processDocument(kbId, documentId, filePath, filetype, filename);
+            } catch (Exception e) {
+                log.warn("后台文档处理任务结束于失败状态: documentId={}, error={}", documentId, e.getMessage());
+            }
+        };
+
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    taskExecutor.execute(task);
+                }
+            });
+        } else {
+            taskExecutor.execute(task);
         }
     }
 
@@ -236,10 +265,10 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
                 LocalDateTime now = LocalDateTime.now();
                 int chunkCount = 0;
+                List<ChunkBgeM3> pendingChunks = new ArrayList<>(INGESTION_BATCH_SIZE);
 
                 for (ParsedDocument section : sections) {
                     String title = section.getTitle();
-                    String content = section.getContent();
 
                     if (title == null || title.trim().isEmpty()) {
                         continue;
@@ -263,36 +292,112 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
                         metaBase.put("totalChunks", chunkContents.size());
                         String metadataJson = objectMapper.writeValueAsString(metaBase);
 
-                        // Embed chunk content (not just title)
-                        float[] embedding = ragService.embed(chunkContent);
-
                         ChunkBgeM3 chunk = ChunkBgeM3.builder()
                                 .kbId(kbId)
                                 .docId(documentId)
                                 .content(chunkContent)
                                 .metadata(metadataJson)
-                                .embedding(embedding)
                                 .createdAt(now)
                                 .updatedAt(now)
                                 .build();
 
-                        int result = chunkBgeM3Mapper.insert(chunk);
-
-                        if (result > 0) {
-                            chunkCount++;
-                            // Index chunk in BM25 Lucene index
-                            chunkBgeM3IndexService.indexChunk(chunk.getId(), documentId, chunkContent);
-                            log.debug("创建 chunk 成功: title={}, chunkIndex={}/{}, chunkId={}", title, i, chunkContents.size(), chunk.getId());
-                        } else {
-                            log.warn("创建 chunk 失败: title={}, chunkIndex={}", title, i);
+                        pendingChunks.add(chunk);
+                        if (pendingChunks.size() >= INGESTION_BATCH_SIZE) {
+                            chunkCount += flushChunkBatch(pendingChunks);
                         }
                     }
                 }
+                chunkCount += flushChunkBatch(pendingChunks);
                 log.info("文档处理完成: documentId={}, filetype={}, 共生成 {} 个 chunks", documentId, filetype, chunkCount);
+                updateProcessingStatus(documentId, "READY", null);
             }
         } catch (Exception e) {
             log.error("处理文档失败: documentId={}, filetype={}", documentId, filetype, e);
+            updateProcessingStatus(documentId, "FAILED", e.getMessage());
+            cleanupFailedDocumentProcessing(documentId);
             throw new BizException("文档解析失败: " + e.getMessage());
+        }
+    }
+
+    private int flushChunkBatch(List<ChunkBgeM3> pendingChunks) {
+        if (pendingChunks.isEmpty()) {
+            return 0;
+        }
+
+        List<ChunkBgeM3> batch = new ArrayList<>(pendingChunks);
+        pendingChunks.clear();
+
+        long start = System.currentTimeMillis();
+        List<String> contents = batch.stream()
+                .map(ChunkBgeM3::getContent)
+                .toList();
+        List<float[]> embeddings = ragService.embedBatch(contents);
+        if (embeddings.size() != batch.size()) {
+            throw new BizException("批量向量化结果数量不匹配");
+        }
+
+        List<ChunkBgeM3IndexService.ChunkIndexRecord> indexRecords = new ArrayList<>(batch.size());
+        for (int i = 0; i < batch.size(); i++) {
+            ChunkBgeM3 chunk = batch.get(i);
+            if (chunk.getId() == null || chunk.getId().isBlank()) {
+                chunk.setId(UUID.randomUUID().toString());
+            }
+            chunk.setEmbedding(embeddings.get(i));
+            indexRecords.add(new ChunkBgeM3IndexService.ChunkIndexRecord(
+                    chunk.getId(),
+                    chunk.getKbId(),
+                    chunk.getDocId(),
+                    chunk.getContent()
+            ));
+        }
+
+        int inserted = chunkBgeM3Mapper.insertBatch(batch);
+        if (inserted != batch.size()) {
+            throw new BizException("批量创建 chunk 数量不匹配: expected=" + batch.size() + ", actual=" + inserted);
+        }
+
+        chunkBgeM3IndexService.indexChunks(indexRecords);
+        log.info("批量处理 chunks 完成: count={}, elapsedMs={}", inserted, System.currentTimeMillis() - start);
+        return inserted;
+    }
+
+    private void updateProcessingStatus(String documentId, String status, String errorMessage) {
+        Document document = documentMapper.selectById(documentId);
+        if (document == null) {
+            return;
+        }
+        try {
+            DocumentDTO dto = documentConverter.toDTO(document);
+            DocumentDTO.MetaData metadata = dto.getMetadata();
+            if (metadata == null) {
+                metadata = new DocumentDTO.MetaData();
+            }
+            metadata.setProcessingStatus(status);
+            metadata.setProcessingError(errorMessage);
+            dto.setMetadata(metadata);
+            dto.setUpdatedAt(LocalDateTime.now());
+
+            Document updatedDocument = documentConverter.toEntity(dto);
+            updatedDocument.setId(documentId);
+            updatedDocument.setKbId(document.getKbId());
+            updatedDocument.setCreatedAt(document.getCreatedAt());
+            updatedDocument.setUpdatedAt(dto.getUpdatedAt());
+            documentMapper.updateById(updatedDocument);
+        } catch (Exception ex) {
+            log.warn("更新文档处理状态失败: documentId={}, status={}", documentId, status, ex);
+        }
+    }
+
+    private void cleanupFailedDocumentProcessing(String documentId) {
+        try {
+            chunkBgeM3Mapper.deleteByDocId(documentId);
+        } catch (Exception cleanupError) {
+            log.warn("清理失败文档 chunks 失败: documentId={}, error={}", documentId, cleanupError.getMessage());
+        }
+        try {
+            chunkBgeM3IndexService.deleteByDocId(documentId);
+        } catch (Exception cleanupError) {
+            log.warn("清理失败文档 BM25 索引失败: documentId={}, error={}", documentId, cleanupError.getMessage());
         }
     }
 

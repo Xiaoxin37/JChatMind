@@ -1,11 +1,17 @@
 package com.kama.jchatmind.integration;
 
+import com.kama.jchatmind.agent.tools.KnowledgeTools;
 import com.kama.jchatmind.model.request.CreateKnowledgeBaseRequest;
 import com.kama.jchatmind.model.response.CreateKnowledgeBaseResponse;
 import com.kama.jchatmind.model.response.CreateDocumentResponse;
+import com.kama.jchatmind.model.vo.DocumentVO;
 import com.kama.jchatmind.service.DocumentFacadeService;
 import com.kama.jchatmind.service.HybridSearchService;
 import com.kama.jchatmind.service.KnowledgeBaseFacadeService;
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,8 +20,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.mock.web.MockMultipartFile;
 
 import java.io.ByteArrayOutputStream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -30,6 +34,9 @@ class E2EIntegrationTests {
 
     @Autowired
     private KnowledgeBaseFacadeService kbFacadeService;
+
+    @Autowired
+    private KnowledgeTools knowledgeTools;
 
     private String testKbId;
 
@@ -57,6 +64,28 @@ class E2EIntegrationTests {
         return new MockMultipartFile(filename, filename, mimeType, content.getBytes());
     }
 
+    private void waitUntilReady(String documentId) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 15_000;
+        String lastStatus = "UNKNOWN";
+
+        while (System.currentTimeMillis() < deadline) {
+            for (DocumentVO document : documentFacadeService.getDocumentsByKbId(testKbId).getDocuments()) {
+                if (documentId.equals(document.getId())) {
+                    lastStatus = document.getStatus();
+                    if ("READY".equals(lastStatus)) {
+                        return;
+                    }
+                    if ("FAILED".equals(lastStatus)) {
+                        fail("Document processing failed: " + documentId);
+                    }
+                }
+            }
+            Thread.sleep(500);
+        }
+
+        fail("Document did not become READY in time: " + documentId + ", lastStatus=" + lastStatus);
+    }
+
     private MockMultipartFile createPdfFile() throws Exception {
         byte[] pdfContent = ("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
                 + "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
@@ -71,40 +100,73 @@ class E2EIntegrationTests {
     }
 
     private MockMultipartFile createDocxFile(String textContent) throws Exception {
-        byte[] docxBytes = createMinimalDocx(textContent);
-        return new MockMultipartFile("test-pipeline.docx", "test-pipeline.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", docxBytes);
-    }
-
-    private byte[] createMinimalDocx(String textContent) throws Exception {
-        String documentXml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-                + "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
-                + "  <w:body>\n"
-                + "    <w:p><w:r><w:t>" + escapeXml(textContent) + "</w:t></w:r></w:p>\n"
-                + "  </w:body>\n"
-                + "</w:document>";
-
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("[Content_Types].xml"));
-            zos.write("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-                    + "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n"
-                    + "  <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n"
-                    + "  <Default Extension=\"xml\" ContentType=\"application/xml\"/>\n"
-                    + "  <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\n"
-                    + "</Types>".getBytes());
-            zos.closeEntry();
-
-            zos.putNextEntry(new ZipEntry("word/document.xml"));
-            zos.write(documentXml.getBytes());
-            zos.closeEntry();
+        try (XWPFDocument document = new XWPFDocument()) {
+            document.createParagraph().createRun().setText(textContent);
+            document.write(baos);
         }
-        return baos.toByteArray();
+        return new MockMultipartFile("test-pipeline.docx", "test-pipeline.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", baos.toByteArray());
     }
 
-    private String escapeXml(String s) {
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("\"", "&quot;").replace("'", "&apos;");
+    private MockMultipartFile createXlsxFile() throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (XSSFWorkbook workbook = new XSSFWorkbook()) {
+            var sheet = workbook.createSheet("Hardware");
+            Row header = sheet.createRow(0);
+            header.createCell(0).setCellValue("name");
+            header.createCell(1).setCellValue("description");
+            header.createCell(2).setCellValue("value");
+
+            Row row1 = sheet.createRow(1);
+            row1.createCell(0).setCellValue("CPU");
+            row1.createCell(1).setCellValue("Processor speed");
+            row1.createCell(2).setCellValue("3.5GHz");
+
+            Row row2 = sheet.createRow(2);
+            row2.createCell(0).setCellValue("RAM");
+            row2.createCell(1).setCellValue("Memory capacity");
+            row2.createCell(2).setCellValue("16GB");
+
+            workbook.write(baos);
+        }
+
+        return new MockMultipartFile(
+                "test-pipeline.xlsx",
+                "test-pipeline.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                baos.toByteArray()
+        );
+    }
+
+    private MockMultipartFile createXlsFile() throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (HSSFWorkbook workbook = new HSSFWorkbook()) {
+            var sheet = workbook.createSheet("LegacyHardware");
+            Row header = sheet.createRow(0);
+            header.createCell(0).setCellValue("name");
+            header.createCell(1).setCellValue("description");
+            header.createCell(2).setCellValue("value");
+
+            Row row1 = sheet.createRow(1);
+            row1.createCell(0).setCellValue("Disk");
+            row1.createCell(1).setCellValue("Storage capacity");
+            row1.createCell(2).setCellValue("1TB");
+
+            Row row2 = sheet.createRow(2);
+            row2.createCell(0).setCellValue("NIC");
+            row2.createCell(1).setCellValue("Network bandwidth");
+            row2.createCell(2).setCellValue("10Gbps");
+
+            workbook.write(baos);
+        }
+
+        return new MockMultipartFile(
+                "test-pipeline.xls",
+                "test-pipeline.xls",
+                "application/vnd.ms-excel",
+                baos.toByteArray()
+        );
     }
 
     // === E2E-01: Per-format upload-parse-search tests ===
@@ -117,7 +179,7 @@ class E2EIntegrationTests {
         CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
         assertNotNull(uploadResponse.getDocumentId(), "Upload should return document ID");
 
-        Thread.sleep(2000);
+        waitUntilReady(uploadResponse.getDocumentId());
 
         var results = hybridSearchService.search(testKbId, "Java framework microservices", 5);
         assertFalse(results.isEmpty(), "Search should return results for uploaded TXT content");
@@ -132,7 +194,7 @@ class E2EIntegrationTests {
         CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
         assertNotNull(uploadResponse.getDocumentId(), "Upload should return document ID");
 
-        Thread.sleep(2000);
+        waitUntilReady(uploadResponse.getDocumentId());
 
         var results = hybridSearchService.search(testKbId, "distributed event streaming", 5);
         assertFalse(results.isEmpty(), "Search should return results for uploaded PDF content");
@@ -147,7 +209,7 @@ class E2EIntegrationTests {
         CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
         assertNotNull(uploadResponse.getDocumentId(), "Upload should return document ID");
 
-        Thread.sleep(2000);
+        waitUntilReady(uploadResponse.getDocumentId());
 
         var results = hybridSearchService.search(testKbId, "in-memory data store caching", 5);
         assertFalse(results.isEmpty(), "Search should return results for uploaded DOCX content");
@@ -163,7 +225,7 @@ class E2EIntegrationTests {
         CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
         assertNotNull(uploadResponse.getDocumentId(), "Upload should return document ID");
 
-        Thread.sleep(2000);
+        waitUntilReady(uploadResponse.getDocumentId());
 
         var results = hybridSearchService.search(testKbId, "processor speed memory", 5);
         assertFalse(results.isEmpty(), "Search should return results for uploaded CSV content");
@@ -171,17 +233,47 @@ class E2EIntegrationTests {
                 "Results should contain CPU/RAM table content");
     }
 
+    @Test
+    void test05_fullPipeline_xlsxFile() throws Exception {
+        MockMultipartFile file = createXlsxFile();
+
+        CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
+        assertNotNull(uploadResponse.getDocumentId(), "Upload should return document ID");
+
+        waitUntilReady(uploadResponse.getDocumentId());
+
+        var results = hybridSearchService.search(testKbId, "processor speed memory capacity", 5);
+        assertFalse(results.isEmpty(), "Search should return results for uploaded XLSX content");
+        assertTrue(results.stream().anyMatch(r -> r.content.contains("Processor speed") || r.content.contains("Memory capacity")),
+                "Results should contain Excel table content");
+    }
+
+    @Test
+    void test06_fullPipeline_xlsFile() throws Exception {
+        MockMultipartFile file = createXlsFile();
+
+        CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
+        assertNotNull(uploadResponse.getDocumentId(), "Upload should return document ID");
+
+        waitUntilReady(uploadResponse.getDocumentId());
+
+        var results = hybridSearchService.search(testKbId, "storage capacity network bandwidth", 5);
+        assertFalse(results.isEmpty(), "Search should return results for uploaded XLS content");
+        assertTrue(results.stream().anyMatch(r -> r.content.contains("Storage capacity") || r.content.contains("Network bandwidth")),
+                "Results should contain legacy Excel table content");
+    }
+
     // === E2E-02: Hybrid search + rerank quality test ===
 
     @Test
-    void test05_hybridSearchReturnsRerankedResults() throws Exception {
+    void test07_hybridSearchReturnsRerankedResults() throws Exception {
         String content = "Machine learning is a subset of artificial intelligence that focuses on algorithms that learn from data. "
                 + "Deep learning is a subset of machine learning using neural networks with multiple layers. "
                 + "Natural language processing enables machines to understand and generate human text.";
         MockMultipartFile file = createTextFile("ml-content.txt", "text/plain", content);
 
-        documentFacadeService.uploadDocument(testKbId, file);
-        Thread.sleep(2000);
+        CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
+        waitUntilReady(uploadResponse.getDocumentId());
 
         var results = hybridSearchService.search(testKbId, "neural networks deep learning AI", 5);
 
@@ -198,20 +290,15 @@ class E2EIntegrationTests {
     }
 
     @Test
-    void test06_knowledgeToolReturnsContent() throws Exception {
+    void test08_knowledgeToolReturnsContent() throws Exception {
         String content = "Docker is a platform for containerizing applications. "
                 + "Kubernetes orchestrates containerized applications across clusters of hosts.";
         MockMultipartFile file = createTextFile("devops-content.txt", "text/plain", content);
 
-        documentFacadeService.uploadDocument(testKbId, file);
-        Thread.sleep(2000);
+        CreateDocumentResponse uploadResponse = documentFacadeService.uploadDocument(testKbId, file);
+        waitUntilReady(uploadResponse.getDocumentId());
 
-        var results = hybridSearchService.search(testKbId, "container orchestration", 3);
-        assertFalse(results.isEmpty(), "Search should return results for devops content");
-
-        String joinedContent = results.stream()
-                .map(r -> r.content)
-                .collect(java.util.stream.Collectors.joining("\n"));
+        String joinedContent = knowledgeTools.knowledgeQuery(testKbId, "container orchestration");
         assertFalse(joinedContent.isEmpty(), "Joined content should not be empty");
         assertTrue(joinedContent.contains("container") || joinedContent.contains("Kubernetes"),
                 "Result content should contain container or Kubernetes references");

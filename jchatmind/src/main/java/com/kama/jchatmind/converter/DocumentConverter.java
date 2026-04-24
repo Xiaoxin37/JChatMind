@@ -52,12 +52,17 @@ public class DocumentConverter {
     }
 
     public DocumentVO toVO(DocumentDTO dto) {
+        String status = "READY";
+        if (dto.getMetadata() != null && dto.getMetadata().getProcessingStatus() != null) {
+            status = dto.getMetadata().getProcessingStatus();
+        }
         return DocumentVO.builder()
                 .id(dto.getId())
                 .kbId(dto.getKbId())
                 .filename(dto.getFilename())
                 .filetype(dto.getFiletype())
                 .size(dto.getSize())
+                .status(status)
                 .build();
     }
 

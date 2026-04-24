@@ -299,6 +299,7 @@ export interface DocumentVO {
   filename: string;
   filetype: string;
   size: number;
+  status: string;
 }
 
 export interface GetDocumentsResponse {

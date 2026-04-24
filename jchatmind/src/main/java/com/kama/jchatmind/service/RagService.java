@@ -5,6 +5,8 @@ import java.util.List;
 public interface RagService {
     float[] embed(String text);
 
+    List<float[]> embedBatch(List<String> texts);
+
     List<String> similaritySearch(String kbId, String title);
 
     List<String> similaritySearch(String kbId, String query, int topK);

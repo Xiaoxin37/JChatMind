@@ -9,18 +9,22 @@ export function useDocuments(kbId: string | undefined) {
   const [documents, setDocuments] = useState<DocumentVO[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const fetchDocuments = useCallback(async () => {
+  const fetchDocuments = useCallback(async (silent = false) => {
     if (!kbId) {
       setDocuments([]);
       return;
     }
 
-    setLoading(true);
+    if (!silent) {
+      setLoading(true);
+    }
     try {
       const resp = await getDocumentsByKbId(kbId);
       setDocuments(resp.documents);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [kbId]);
 
@@ -40,4 +44,3 @@ export function useDocuments(kbId: string | undefined) {
     deleteDocument: deleteDocumentHandle,
   };
 }
-

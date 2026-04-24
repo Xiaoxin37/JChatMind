@@ -48,11 +48,13 @@ public class MarkdownParserServiceImpl implements MarkdownParserService {
 
             // Convert to ParsedDocument with hierarchy info
             List<ParsedDocument> result = new ArrayList<>();
-            List<String> parentHierarchy = new ArrayList<>();
+            List<String> headingStack = new ArrayList<>();
             for (MarkdownSectionData section : sections) {
-                // Build hierarchy for this section based on heading level
-                List<String> hierarchy = new ArrayList<>(parentHierarchy.subList(
-                        0, Math.max(0, section.level - 1)));
+                while (headingStack.size() >= section.level) {
+                    headingStack.remove(headingStack.size() - 1);
+                }
+                headingStack.add(section.title);
+                List<String> hierarchy = new ArrayList<>(headingStack);
                 result.add(new ParsedDocument(section.title, section.content, hierarchy, "md"));
             }
             return result;

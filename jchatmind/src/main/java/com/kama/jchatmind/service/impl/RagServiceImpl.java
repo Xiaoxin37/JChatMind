@@ -5,6 +5,7 @@ import com.kama.jchatmind.model.entity.ChunkBgeM3;
 import com.kama.jchatmind.service.RagService;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.Assert;
@@ -16,26 +17,38 @@ import java.util.List;
 import java.util.Map;
 
 @Service
+@Slf4j
 public class RagServiceImpl implements RagService {
 
     // 封装本地的模型调用
     private final WebClient webClient;
     private final ChunkBgeM3Mapper chunkBgeM3Mapper;
 
-    @Value("${rag.reranking.model:bge-reranker-v2-m3}")
+    @Value("${rag.reranking.model:qllama/bge-reranker-v2-m3}")
     private String rerankModel;
 
     @Value("${rag.reranking.timeout-seconds:5}")
     private int rerankTimeout;
 
+    @Autowired
     public RagServiceImpl(WebClient.Builder builder, ChunkBgeM3Mapper chunkBgeM3Mapper) {
         this.webClient = builder.baseUrl("http://localhost:11434").build();
+        this.chunkBgeM3Mapper = chunkBgeM3Mapper;
+    }
+
+    RagServiceImpl(WebClient webClient, ChunkBgeM3Mapper chunkBgeM3Mapper) {
+        this.webClient = webClient;
         this.chunkBgeM3Mapper = chunkBgeM3Mapper;
     }
 
     @Data
     private static class EmbeddingResponse {
         private float[] embedding;
+    }
+
+    @Data
+    private static class BatchEmbeddingResponse {
+        private List<float[]> embeddings;
     }
 
     private float[] doEmbed(String text) {
@@ -55,6 +68,42 @@ public class RagServiceImpl implements RagService {
     @Override
     public float[] embed(String text) {
         return doEmbed(text);
+    }
+
+    @Override
+    public List<float[]> embedBatch(List<String> texts) {
+        if (texts == null || texts.isEmpty()) {
+            return List.of();
+        }
+        if (texts.size() == 1) {
+            return List.of(doEmbed(texts.get(0)));
+        }
+
+        try {
+            BatchEmbeddingResponse resp = webClient.post()
+                    .uri("/api/embed")
+                    .bodyValue(Map.of(
+                            "model", "bge-m3",
+                            "input", texts
+                    ))
+                    .retrieve()
+                    .bodyToMono(BatchEmbeddingResponse.class)
+                    .block();
+            Assert.notNull(resp, "Batch embedding response cannot be null");
+            Assert.notNull(resp.getEmbeddings(), "Batch embedding response embeddings cannot be null");
+            if (resp.getEmbeddings().size() != texts.size()) {
+                throw new IllegalStateException("Batch embedding size mismatch: expected "
+                        + texts.size() + ", actual " + resp.getEmbeddings().size());
+            }
+            return resp.getEmbeddings();
+        } catch (Exception e) {
+            log.warn("批量 embedding 调用失败，回退为逐条 embedding: count={}, error={}", texts.size(), e.getMessage());
+            List<float[]> embeddings = new ArrayList<>(texts.size());
+            for (String text : texts) {
+                embeddings.add(doEmbed(text));
+            }
+            return embeddings;
+        }
     }
 
     @Override
@@ -80,7 +129,7 @@ public class RagServiceImpl implements RagService {
         try {
             queryEmbedding = doEmbedForRerank(query);
         } catch (Exception e) {
-            log.warn("Rerank failed: cannot embed query, returning original order", e);
+            log.warn("Rerank failed: cannot embed query, returning original order: {}", e.getMessage());
             return fallbackResults(documents.size());
         }
 
@@ -94,9 +143,8 @@ public class RagServiceImpl implements RagService {
             try {
                 pairEmbedding = doEmbedForRerank(pairText);
             } catch (Exception e) {
-                log.warn("Rerank failed for document index {}, skipping", i, e);
-                results.add(new RerankResult(i, 0.0));
-                continue;
+                log.warn("Rerank failed for document index {}, returning original order: {}", i, e.getMessage());
+                return fallbackResults(documents.size());
             }
 
             double similarity = cosineSimilarity(queryEmbedding, pairEmbedding);
@@ -140,7 +188,7 @@ public class RagServiceImpl implements RagService {
     private List<RerankResult> fallbackResults(int size) {
         List<RerankResult> results = new ArrayList<>();
         for (int i = 0; i < size; i++) {
-            results.add(new RerankResult(i, 0.0));
+            results.add(new RerankResult(i, 1.0 / (i + 1)));
         }
         return results;
     }

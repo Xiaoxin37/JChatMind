@@ -118,4 +118,11 @@
 
 **Dependencies:** Phase 1, 2, 3, 4（所有前置阶段）
 
+**Plans:** 3 plans
+
+Plans:
+- [ ] 5-01-PLAN.md — pgvector L2 to cosine migration (SQL + MyBatis XML)
+- [ ] 5-02-PLAN.md — Wire HybridSearchService into Agent KnowledgeTools
+- [ ] 5-03-PLAN.md — E2E integration tests (upload->parse->chunk->search->rerank)
+
 **UI hint:** yes — 前端上传状态展示

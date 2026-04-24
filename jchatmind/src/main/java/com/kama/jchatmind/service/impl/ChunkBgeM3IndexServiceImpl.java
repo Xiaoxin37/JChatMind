@@ -5,14 +5,15 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.*;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
+import org.apache.lucene.search.similarities.BM25Similarity;
+import org.apache.lucene.analysis.cn.smart.SmartChineseAnalyzer;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.springframework.beans.factory.annotation.Value;
@@ -33,7 +34,7 @@ import java.util.List;
 @Slf4j
 public class ChunkBgeM3IndexServiceImpl implements ChunkBgeM3IndexService {
 
-    private final Analyzer analyzer = new StandardAnalyzer();
+    private final Analyzer analyzer = new SmartChineseAnalyzer();
     private IndexWriter indexWriter;
     private Directory directory;
 
@@ -74,24 +75,35 @@ public class ChunkBgeM3IndexServiceImpl implements ChunkBgeM3IndexService {
     }
 
     @Override
-    public void indexChunk(String chunkId, String docId, String content) {
+    public void indexChunk(String chunkId, String kbId, String docId, String content) {
+        indexChunks(List.of(new ChunkIndexRecord(chunkId, kbId, docId, content)));
+    }
+
+    @Override
+    public void indexChunks(List<ChunkIndexRecord> chunks) {
+        if (chunks == null || chunks.isEmpty()) {
+            return;
+        }
         try {
-            Document doc = new Document();
-            doc.add(new StoredField("chunkId", chunkId));
-            doc.add(new StoredField("docId", docId));
-            doc.add(new TextField("content", content, Field.Store.NO));
-            indexWriter.addDocument(doc);
+            for (ChunkIndexRecord chunk : chunks) {
+                Document doc = new Document();
+                doc.add(new StringField("chunkId", chunk.chunkId, Field.Store.YES));
+                doc.add(new StringField("kbId", chunk.kbId, Field.Store.YES));
+                doc.add(new StringField("docId", chunk.docId, Field.Store.YES));
+                doc.add(new TextField("content", chunk.content, Field.Store.YES));
+                indexWriter.addDocument(doc);
+            }
             indexWriter.commit();
         } catch (IOException e) {
-            log.error("索引 chunk 失败: chunkId={}", chunkId, e);
-            throw new RuntimeException("索引 chunk 失败: " + e.getMessage(), e);
+            log.error("批量索引 chunks 失败: count={}", chunks.size(), e);
+            throw new RuntimeException("批量索引 chunks 失败: " + e.getMessage(), e);
         }
     }
 
     @Override
     public void deleteByDocId(String docId) {
         try {
-            int deleted = indexWriter.deleteDocuments(new Term("docId", docId));
+            long deleted = indexWriter.deleteDocuments(new Term("docId", docId));
             indexWriter.commit();
             log.info("BM25 索引删除: docId={}, 删除了 {} 条记录", docId, deleted);
         } catch (IOException e) {
@@ -101,13 +113,17 @@ public class ChunkBgeM3IndexServiceImpl implements ChunkBgeM3IndexService {
     }
 
     @Override
-    public List<Bm25Result> search(String query, int topK) {
+    public List<Bm25Result> search(String kbId, String query, int topK) {
         try (IndexReader reader = DirectoryReader.open(indexWriter)) {
             IndexSearcher searcher = new IndexSearcher(reader);
             searcher.setSimilarity(new BM25Similarity());
 
             QueryParser parser = new QueryParser("content", analyzer);
-            Query luceneQuery = parser.parse(query);
+            Query contentQuery = parser.parse(query);
+            Query luceneQuery = new BooleanQuery.Builder()
+                    .add(new TermQuery(new Term("kbId", kbId)), BooleanClause.Occur.FILTER)
+                    .add(contentQuery, BooleanClause.Occur.MUST)
+                    .build();
 
             TopDocs topDocs = searcher.search(luceneQuery, topK);
             List<Bm25Result> results = new ArrayList<>();

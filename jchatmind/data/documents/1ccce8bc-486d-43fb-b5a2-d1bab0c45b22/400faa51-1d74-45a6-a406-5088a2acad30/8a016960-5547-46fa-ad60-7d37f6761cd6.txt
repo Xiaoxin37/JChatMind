@@ -1,0 +1,1 @@
+Docker is a platform for containerizing applications. Kubernetes orchestrates containerized applications across clusters of hosts.

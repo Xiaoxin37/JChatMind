@@ -7,7 +7,10 @@ import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
 import java.nio.charset.Charset;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -51,11 +54,14 @@ public class TxtParserService {
     }
 
     private String decodeText(byte[] bytes) {
-        // Try UTF-8 first
         try {
-            return new String(bytes, StandardCharsets.UTF_8);
-        } catch (Exception ignored) {
-            // Fallback to GBK
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes))
+                    .toString();
+        } catch (CharacterCodingException ignored) {
+            log.debug("TXT 文件不是有效 UTF-8，尝试 GBK 解码");
         }
         try {
             return new String(bytes, Charset.forName("GBK"));
@@ -67,9 +73,10 @@ public class TxtParserService {
 
     private List<ParsedDocument> parseWithHeadings(String text) {
         String[] lines = text.split("\n", -1);
-        List<ParsedDocument> sections = new java.util.ArrayList<>();
+        List<ParsedDocument> sections = new ArrayList<>();
         StringBuilder currentContent = new StringBuilder();
         String currentTitle = null;
+        List<String> headingStack = new ArrayList<>();
 
         Pattern headingPattern = Pattern.compile("^(#{1,6})\\s+(.+)$");
 
@@ -79,9 +86,14 @@ public class TxtParserService {
                 // Save previous section
                 if (currentTitle != null) {
                     sections.add(new ParsedDocument(currentTitle, currentContent.toString().trim(),
-                            Collections.emptyList(), "txt"));
+                            new ArrayList<>(headingStack), "txt"));
+                }
+                int level = matcher.group(1).length();
+                while (headingStack.size() >= level) {
+                    headingStack.remove(headingStack.size() - 1);
                 }
                 currentTitle = matcher.group(2).trim();
+                headingStack.add(currentTitle);
                 currentContent = new StringBuilder();
             } else {
                 if (currentTitle != null) {
@@ -96,7 +108,7 @@ public class TxtParserService {
         // Save last section
         if (currentTitle != null) {
             sections.add(new ParsedDocument(currentTitle, currentContent.toString().trim(),
-                    Collections.emptyList(), "txt"));
+                    new ArrayList<>(headingStack), "txt"));
         }
 
         return sections;

@@ -25,6 +25,7 @@ import java.util.List;
 public class PdfParserService {
 
     private static final int CONTENT_SPLIT_THRESHOLD = 2000;
+    private static final int MAX_EXTRACTED_TEXT_CHARS = 50 * 1024 * 1024;
 
     public List<ParsedDocument> parse(InputStream inputStream) {
         return parse(inputStream, null);
@@ -32,7 +33,7 @@ public class PdfParserService {
 
     public List<ParsedDocument> parse(InputStream inputStream, String filename) {
         try {
-            BodyContentHandler handler = new BodyContentHandler(10 * 1024 * 1024);
+            BodyContentHandler handler = new BodyContentHandler(MAX_EXTRACTED_TEXT_CHARS);
             Metadata metadata = new Metadata();
             ParseContext parseContext = new ParseContext();
             Parser parser = new AutoDetectParser();

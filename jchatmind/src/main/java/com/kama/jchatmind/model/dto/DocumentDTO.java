@@ -27,5 +27,7 @@ public class DocumentDTO {
     @Data
     public static class MetaData {
         private String filePath; // 文件存储路径
+        private String processingStatus;
+        private String processingError;
     }
 }

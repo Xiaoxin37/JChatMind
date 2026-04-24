@@ -11,5 +11,5 @@ public class DocumentVO {
     private String filename;
     private String filetype;
     private Long size;
+    private String status;
 }
-

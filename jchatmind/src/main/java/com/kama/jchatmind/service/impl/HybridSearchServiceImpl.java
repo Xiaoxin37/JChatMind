@@ -1,11 +1,16 @@
 package com.kama.jchatmind.service.impl;
 
-import com.kama.jchatmind.exception.BizException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kama.jchatmind.mapper.ChunkBgeM3Mapper;
+import com.kama.jchatmind.mapper.DocumentMapper;
+import com.kama.jchatmind.model.dto.DocumentDTO;
 import com.kama.jchatmind.model.entity.ChunkBgeM3;
+import com.kama.jchatmind.model.entity.Document;
 import com.kama.jchatmind.service.ChunkBgeM3IndexService;
 import com.kama.jchatmind.service.ChunkBgeM3IndexService.Bm25Result;
 import com.kama.jchatmind.service.HybridSearchService;
+import com.kama.jchatmind.service.HybridSearchService.SearchTrace;
+import com.kama.jchatmind.service.HybridSearchService.StageResult;
 import com.kama.jchatmind.service.RagService;
 import com.kama.jchatmind.service.RagService.RerankResult;
 import lombok.extern.slf4j.Slf4j;
@@ -27,6 +32,8 @@ public class HybridSearchServiceImpl implements HybridSearchService {
     private final ChunkBgeM3IndexService bm25IndexService;
     private final RagService ragService;
     private final ChunkBgeM3Mapper chunkBgeM3Mapper;
+    private final DocumentMapper documentMapper;
+    private final ObjectMapper objectMapper;
 
     @Value("${rag.retrieval.bm25-top-k:20}")
     private int bm25TopK;
@@ -48,20 +55,34 @@ public class HybridSearchServiceImpl implements HybridSearchService {
 
     public HybridSearchServiceImpl(ChunkBgeM3IndexService bm25IndexService,
                                     RagService ragService,
-                                    ChunkBgeM3Mapper chunkBgeM3Mapper) {
+                                    ChunkBgeM3Mapper chunkBgeM3Mapper,
+                                    DocumentMapper documentMapper,
+                                    ObjectMapper objectMapper) {
         this.bm25IndexService = bm25IndexService;
         this.ragService = ragService;
         this.chunkBgeM3Mapper = chunkBgeM3Mapper;
+        this.documentMapper = documentMapper;
+        this.objectMapper = objectMapper;
     }
 
     @Override
     public List<HybridResult> search(String kbId, String query, int topK) {
+        return searchWithTrace(kbId, query, topK).finalResults.stream()
+                .map(result -> new HybridResult(result.chunkId, result.content, result.metadata, result.score))
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public SearchTrace searchWithTrace(String kbId, String query, int topK) {
         log.info("混合检索: kbId={}, query={}, topK={}", kbId, query, topK);
 
         // Step 1: BM25 search
         List<Bm25Result> bm25Results;
         try {
-            bm25Results = bm25IndexService.search(query, bm25TopK);
+            bm25Results = bm25IndexService.search(kbId, query, bm25TopK);
+            bm25Results = bm25Results.stream()
+                    .filter(result -> isReadyChunk(result.chunkId))
+                    .collect(Collectors.toList());
         } catch (Exception e) {
             log.warn("BM25 搜索失败，降级为向量搜索", e);
             bm25Results = Collections.emptyList();
@@ -80,14 +101,22 @@ public class HybridSearchServiceImpl implements HybridSearchService {
 
         // Step 3: RRF Fusion - get rerankTopN candidates
         List<HybridResult> rrfResults = rrfFuse(bm25Results, vectorResults, rerankTopN);
+        List<StageResult> rrfTrace = toStageResults(rrfResults, "rrf");
 
         // Step 4: Rerank (if enabled) and return final topK
+        List<HybridResult> finalResults;
         if (rerankingEnabled && !rrfResults.isEmpty()) {
-            return applyReranking(query, rrfResults, topK);
+            finalResults = applyReranking(query, rrfResults, topK);
+        } else {
+            finalResults = rrfResults.stream().limit(topK).collect(Collectors.toList());
         }
 
-        // Return topK from RRF results (no reranking)
-        return rrfResults.stream().limit(topK).collect(Collectors.toList());
+        return new SearchTrace(
+                toBm25StageResults(bm25Results),
+                toVectorStageResults(vectorResults),
+                rrfTrace,
+                toStageResults(finalResults, rerankingEnabled ? "final=rrf+exact+rerank" : "final=rrf")
+        );
     }
 
     /**
@@ -96,7 +125,7 @@ public class HybridSearchServiceImpl implements HybridSearchService {
      */
     private List<HybridResult> applyReranking(String query, List<HybridResult> candidates, int topK) {
         List<String> contents = candidates.stream()
-                .map(HybridResult::content)
+                .map(result -> result.content)
                 .collect(Collectors.toList());
 
         List<RerankResult> reranked;
@@ -107,25 +136,28 @@ public class HybridSearchServiceImpl implements HybridSearchService {
             return candidates.stream().limit(topK).collect(Collectors.toList());
         }
 
-        // Map reranked scores back to hybrid results
+        // Map reranked scores back to hybrid results. Rerank is a secondary signal;
+        // RRF and exact query-term hits stay in the final score so precise fields
+        // like names, schools, and phone numbers are not pushed down by semantic noise.
         Map<Integer, Double> rerankScoreMap = new HashMap<>();
         for (RerankResult rr : reranked) {
             rerankScoreMap.put(rr.originalIndex, rr.score);
         }
 
-        // Build reranked hybrid results, sorted by rerank score descending
         List<HybridResult> rerankedResults = new ArrayList<>();
-        for (RerankResult rr : reranked) {
-            if (rr.originalIndex >= 0 && rr.originalIndex < candidates.size()) {
-                HybridResult original = candidates.get(rr.originalIndex);
-                rerankedResults.add(new HybridResult(
-                        original.chunkId,
-                        original.content,
-                        original.metadata,
-                        rr.score  // replace RRF score with rerank score
-                ));
-            }
+        for (int i = 0; i < candidates.size(); i++) {
+            HybridResult original = candidates.get(i);
+            double rerankScore = rerankScoreMap.getOrDefault(i, 0.0);
+            double exactBoost = exactTermBoost(query, original.content);
+            double finalScore = original.rrfScore + exactBoost + 0.05 * rerankScore;
+            rerankedResults.add(new HybridResult(
+                    original.chunkId,
+                    original.content,
+                    original.metadata,
+                    finalScore
+            ));
         }
+        rerankedResults.sort(Comparator.comparingDouble((HybridResult result) -> result.rrfScore).reversed());
 
         // Return final top-K
         List<HybridResult> finalResults = rerankedResults.stream()
@@ -134,6 +166,34 @@ public class HybridSearchServiceImpl implements HybridSearchService {
 
         log.info("重排序完成: 候选数={}, 最终结果={}", candidates.size(), finalResults.size());
         return finalResults;
+    }
+
+    private double exactTermBoost(String query, String content) {
+        if (query == null || content == null || content.isBlank()) {
+            return 0.0;
+        }
+
+        List<String> terms = Arrays.stream(query.trim().split("\\s+"))
+                .map(String::trim)
+                .filter(term -> term.length() >= 2)
+                .distinct()
+                .toList();
+        if (terms.isEmpty()) {
+            return 0.0;
+        }
+
+        int matched = 0;
+        int matchedChars = 0;
+        for (String term : terms) {
+            if (content.contains(term)) {
+                matched++;
+                matchedChars += term.length();
+            }
+        }
+        if (matched == 0) {
+            return 0.0;
+        }
+        return 0.20 * matched + Math.min(0.20, matchedChars / 100.0);
     }
 
     /**
@@ -201,5 +261,76 @@ public class HybridSearchServiceImpl implements HybridSearchService {
         }
         sb.append("]");
         return sb.toString();
+    }
+
+    private boolean isReadyChunk(String chunkId) {
+        ChunkBgeM3 chunk = chunkBgeM3Mapper.selectById(chunkId);
+        return chunk != null && isReadyDocument(chunk.getDocId());
+    }
+
+    private boolean isReadyDocument(String docId) {
+        Document document = documentMapper.selectById(docId);
+        if (document == null) {
+            return false;
+        }
+        try {
+            if (document.getMetadata() == null || document.getMetadata().isBlank()) {
+                return true;
+            }
+            DocumentDTO.MetaData metadata = objectMapper.readValue(document.getMetadata(), DocumentDTO.MetaData.class);
+            return metadata.getProcessingStatus() == null || "READY".equals(metadata.getProcessingStatus());
+        } catch (Exception e) {
+            log.warn("读取文档处理状态失败，跳过检索结果: docId={}", docId, e);
+            return false;
+        }
+    }
+
+    private List<StageResult> toBm25StageResults(List<Bm25Result> results) {
+        List<StageResult> trace = new ArrayList<>();
+        for (int i = 0; i < results.size(); i++) {
+            Bm25Result result = results.get(i);
+            ChunkBgeM3 chunk = chunkBgeM3Mapper.selectById(result.chunkId);
+            trace.add(new StageResult(
+                    i + 1,
+                    result.chunkId,
+                    chunk != null ? chunk.getContent() : "",
+                    chunk != null ? chunk.getMetadata() : null,
+                    result.score,
+                    "bm25"
+            ));
+        }
+        return trace;
+    }
+
+    private List<StageResult> toVectorStageResults(List<ChunkBgeM3> results) {
+        List<StageResult> trace = new ArrayList<>();
+        for (int i = 0; i < results.size(); i++) {
+            ChunkBgeM3 chunk = results.get(i);
+            trace.add(new StageResult(
+                    i + 1,
+                    chunk.getId(),
+                    chunk.getContent(),
+                    chunk.getMetadata(),
+                    1.0 / (i + 1),
+                    "vector-rank"
+            ));
+        }
+        return trace;
+    }
+
+    private List<StageResult> toStageResults(List<HybridResult> results, String reason) {
+        List<StageResult> trace = new ArrayList<>();
+        for (int i = 0; i < results.size(); i++) {
+            HybridResult result = results.get(i);
+            trace.add(new StageResult(
+                    i + 1,
+                    result.chunkId,
+                    result.content,
+                    result.metadata,
+                    result.rrfScore,
+                    reason
+            ));
+        }
+        return trace;
     }
 }

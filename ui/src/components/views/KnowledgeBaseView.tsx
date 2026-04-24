@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   Card,
@@ -10,6 +10,7 @@ import {
   Space,
   message,
   Empty,
+  Tag,
 } from "antd";
 import {
   BookOutlined,
@@ -24,6 +25,22 @@ import { uploadDocument, type DocumentVO } from "../../api/api.ts";
 
 const { Title, Text, Paragraph } = Typography;
 
+type PendingUpload = {
+  id: string;
+  kbId: string;
+  filename: string;
+  filetype: string;
+  size: number;
+  status: string;
+};
+
+const STATUS_META: Record<string, { label: string; color: string }> = {
+  PROCESSING: { label: "处理中", color: "processing" },
+  READY: { label: "已完成", color: "success" },
+  FAILED: { label: "失败", color: "error" },
+  UPLOADING: { label: "上传中", color: "blue" },
+};
+
 const KnowledgeBaseView: React.FC = () => {
   const { knowledgeBaseId } = useParams<{ knowledgeBaseId?: string }>();
   const { knowledgeBases } = useKnowledgeBases();
@@ -31,6 +48,7 @@ const KnowledgeBaseView: React.FC = () => {
     useDocuments(knowledgeBaseId);
 
   const [uploading, setUploading] = useState(false);
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
 
   // 查找当前知识库的详细信息
   const currentKnowledgeBase = useMemo(() => {
@@ -40,6 +58,21 @@ const KnowledgeBaseView: React.FC = () => {
       null
     );
   }, [knowledgeBaseId, knowledgeBases]);
+
+  const hasProcessingDocuments = useMemo(
+    () => documents.some((document) => document.status === "PROCESSING"),
+    [documents],
+  );
+
+  useEffect(() => {
+    if (!hasProcessingDocuments) return;
+
+    const timer = window.setInterval(() => {
+      refreshDocuments(true);
+    }, 4000);
+
+    return () => window.clearInterval(timer);
+  }, [hasProcessingDocuments, refreshDocuments]);
 
   // 处理文件上传
   const handleUpload: UploadProps["customRequest"] = async (options) => {
@@ -51,19 +84,33 @@ const KnowledgeBaseView: React.FC = () => {
     }
 
     setUploading(true);
+    const uploadId = `pending-${Date.now()}`;
+    const pendingUpload: PendingUpload = {
+      id: uploadId,
+      kbId: knowledgeBaseId,
+      filename: (file as File).name,
+      filetype: ((file as File).name.split(".").pop() || "").toLowerCase(),
+      size: (file as File).size,
+      status: "UPLOADING",
+    };
+    setPendingUploads((current) => [pendingUpload, ...current]);
 
     try {
       await uploadDocument(knowledgeBaseId, file as File);
-      message.success("文档上传成功");
+      message.success("文档已上传，正在后台处理");
       await refreshDocuments();
       onSuccess?.(file);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "上传失败");
       onError?.(error as Error);
     } finally {
+      setPendingUploads((current) => current.filter((item) => item.id !== uploadId));
       setUploading(false);
     }
   };
+
+  const getStatusMeta = (status: string) =>
+    STATUS_META[status] || { label: status, color: "default" };
 
   // 格式化文件大小
   const formatFileSize = (bytes: number): string => {
@@ -101,24 +148,38 @@ const KnowledgeBaseView: React.FC = () => {
       render: (size: number) => formatFileSize(size),
     },
     {
+      title: "状态",
+      dataIndex: "status",
+      key: "status",
+      width: 120,
+      render: (status: string) => {
+        const meta = getStatusMeta(status);
+        return <Tag color={meta.color}>{meta.label}</Tag>;
+      },
+    },
+    {
       title: "操作",
       key: "action",
       width: 100,
       render: (_: unknown, record: DocumentVO) => (
-        <Popconfirm
-          title="确定要删除这个文档吗？"
-          description="删除后将无法恢复"
-          onConfirm={() => deleteDocument(record.id)}
-          okText="确定"
-          cancelText="取消"
-        >
-          <Button type="text" danger icon={<DeleteOutlined />} size="small">
-            删除
-          </Button>
-        </Popconfirm>
+        record.id.startsWith("pending-") ? null : (
+          <Popconfirm
+            title="确定要删除这个文档吗？"
+            description="删除后将无法恢复"
+            onConfirm={() => deleteDocument(record.id)}
+            okText="确定"
+            cancelText="取消"
+          >
+            <Button type="text" danger icon={<DeleteOutlined />} size="small">
+              删除
+            </Button>
+          </Popconfirm>
+        )
       ),
     },
   ];
+
+  const tableDocuments: DocumentVO[] = [...pendingUploads, ...documents];
 
   // 未选择知识库时的提示
   if (!knowledgeBaseId) {
@@ -208,26 +269,26 @@ const KnowledgeBaseView: React.FC = () => {
               </Button>
             </Upload>
             <Text type="secondary" className="block mt-2 text-xs">
-              支持格式: Markdown
+              支持格式: Markdown、TXT、DOCX、PDF、XLSX、XLS、CSV
             </Text>
           </Card>
         </div>
 
         <div className="mb-3">
           {/* 文档列表 */}
-          <Card title={`文档列表 (${documents.length})`}>
+          <Card title={`文档列表 (${tableDocuments.length})`}>
             {loading ? (
               <div className="text-center py-8">
                 <Text type="secondary">加载中...</Text>
               </div>
-            ) : documents.length === 0 ? (
+            ) : tableDocuments.length === 0 ? (
               <Empty
                 description={<Text type="secondary">暂无文档，请上传文档</Text>}
               />
             ) : (
               <Table
                 columns={columns}
-                dataSource={documents}
+                dataSource={tableDocuments}
                 rowKey="id"
                 pagination={{
                   pageSize: 10,

@@ -26,6 +26,11 @@ public class DocumentParserServiceImpl implements DocumentParserService {
 
     @Override
     public List<ParsedDocument> parse(InputStream inputStream, String format) {
+        return parse(inputStream, format, null);
+    }
+
+    @Override
+    public List<ParsedDocument> parse(InputStream inputStream, String format, String filename) {
         log.info("解析文件类型: {}", format);
 
         switch (format.toLowerCase()) {
@@ -34,7 +39,7 @@ public class DocumentParserServiceImpl implements DocumentParserService {
             case "docx":
                 return docxParserService.parse(inputStream);
             case "pdf":
-                return pdfParserService.parse(inputStream);
+                return pdfParserService.parse(inputStream, filename);
             case "xlsx":
             case "xls":
             case "csv":

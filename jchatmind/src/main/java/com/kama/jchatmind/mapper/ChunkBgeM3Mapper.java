@@ -16,9 +16,13 @@ import java.util.List;
 public interface ChunkBgeM3Mapper {
     int insert(ChunkBgeM3 chunkBgeM3);
 
+    int insertBatch(@Param("chunks") List<ChunkBgeM3> chunks);
+
     ChunkBgeM3 selectById(String id);
 
     int deleteById(String id);
+
+    int deleteByDocId(@Param("docId") String docId);
 
     int updateById(ChunkBgeM3 chunkBgeM3);
 

@@ -4,11 +4,8 @@ import com.kama.jchatmind.exception.BizException;
 import com.kama.jchatmind.model.dto.ParsedDocument;
 import com.opencsv.CSVReader;
 import com.opencsv.CSVReaderBuilder;
-import com.opencsv.exceptions.CsvException;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-import org.apache.tika.io.TikaInputStream;
 import org.apache.tika.parser.txt.CharsetDetector;
 import org.springframework.stereotype.Service;
 
@@ -21,7 +18,7 @@ import java.util.List;
 
 /**
  * Excel/CSV parser using Apache POI for .xlsx and OpenCSV for .csv.
- * - .xlsx: row-by-row access via POI XSSFWorkbook
+ * - .xlsx/.xls: row-by-row access via POI WorkbookFactory
  * - .csv: auto-detected encoding via Tika CharsetDetector, then OpenCSV reader
  * - Each sheet becomes a ParsedDocument section with sheet name as title
  * - Rows converted to Markdown table format
@@ -35,7 +32,7 @@ public class ExcelParserService {
             if ("csv".equalsIgnoreCase(format)) {
                 return parseCsv(inputStream);
             } else if ("xlsx".equalsIgnoreCase(format) || "xls".equalsIgnoreCase(format)) {
-                return parseExcel(inputStream);
+                return parseExcel(inputStream, format);
             } else {
                 throw new BizException("Excel/CSV 文件格式错误或包含不可读字符");
             }
@@ -47,9 +44,9 @@ public class ExcelParserService {
         }
     }
 
-    private List<ParsedDocument> parseExcel(InputStream inputStream) throws Exception {
+    private List<ParsedDocument> parseExcel(InputStream inputStream, String format) throws Exception {
         List<ParsedDocument> sections = new ArrayList<>();
-        try (Workbook workbook = new XSSFWorkbook(inputStream)) {
+        try (Workbook workbook = WorkbookFactory.create(inputStream)) {
             int sheetCount = workbook.getNumberOfSheets();
             for (int i = 0; i < sheetCount; i++) {
                 Sheet sheet = workbook.getSheetAt(i);
@@ -59,7 +56,7 @@ public class ExcelParserService {
                         sheetName,
                         markdownTable,
                         Collections.emptyList(),
-                        "xlsx"
+                        format.toLowerCase()
                 ));
             }
         }
@@ -69,7 +66,9 @@ public class ExcelParserService {
     private List<ParsedDocument> parseCsv(InputStream inputStream) throws Exception {
         // Detect encoding using Tika CharsetDetector
         byte[] bytes = inputStream.readAllBytes();
-        String encoding = CharsetDetector.detect(bytes).getName();
+        CharsetDetector detector = new CharsetDetector();
+        detector.setText(bytes);
+        String encoding = detector.detect().getName();
         if (encoding == null) {
             encoding = "UTF-8";
         }
@@ -154,32 +153,31 @@ public class ExcelParserService {
 
     private String getCellValue(Cell cell) {
         if (cell == null) return "";
-        switch (cell.getCellType()) {
-            case STRING:
-                return cell.getStringCellValue().trim();
-            case NUMERIC:
-                if (DateUtil.isCellDateFormatted(cell)) {
-                    return cell.getDateCellValue().toString();
-                }
-                // Avoid scientific notation
-                double numVal = cell.getNumericCellValue();
-                if (numVal == (long) numVal) {
-                    return String.valueOf((long) numVal);
-                }
-                return String.valueOf(numVal);
-            case BOOLEAN:
-                return String.valueOf(cell.getBooleanCellValue());
-            case FORMULA:
-                try {
-                    return String.valueOf(cell.getNumericCellValue());
-                } catch (Exception e) {
-                    return cell.getStringCellValue();
-                }
-            case BLANK:
-                return "";
-            default:
-                return "";
+        CellType cellType = cell.getCellType();
+        if (cellType == CellType.STRING) {
+            return cell.getStringCellValue().trim();
         }
+        if (cellType == CellType.NUMERIC) {
+            if (DateUtil.isCellDateFormatted(cell)) {
+                return cell.getDateCellValue().toString();
+            }
+            double numVal = cell.getNumericCellValue();
+            if (numVal == (long) numVal) {
+                return String.valueOf((long) numVal);
+            }
+            return String.valueOf(numVal);
+        }
+        if (cellType == CellType.BOOLEAN) {
+            return String.valueOf(cell.getBooleanCellValue());
+        }
+        if (cellType == CellType.FORMULA) {
+            try {
+                return String.valueOf(cell.getNumericCellValue());
+            } catch (Exception e) {
+                return cell.getStringCellValue();
+            }
+        }
+        return "";
     }
 
     private boolean isRowEmpty(Row row) {
